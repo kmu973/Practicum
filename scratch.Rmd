@@ -1,0 +1,148 @@
+---
+title: "Practicum_scratch"
+author: "Rebekah Adams"
+date: "2023-01-16"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r packages}
+#install.packages("tidyverse")
+#install.packages("sf")
+#install.packages("tidycensus")
+library(tidyverse)
+library(sf)
+library(tidycensus)
+```
+
+```{r}
+# read in quarterly files
+q1_2022 <- st_read("./data/indego-trips-2022-q1.csv")
+q2_2022 <- st_read("./data/indego-trips-2022-q2.csv")
+q3_2022 <- st_read("./data/indego-trips-2022-q3.csv")
+q4_2022 <- st_read("./data/indego-trips-2022-q4.csv")
+```
+
+```{r}
+# rbind
+data_2022 <- rbind(q1_2022, q2_2022, q3_2022, q4_2022)
+
+#900k rows - how best to run things without crashing my computer?
+```
+
+```{r stations}
+stations = data_2022 %>%
+  group_by(start_station) %>%
+  summarize(stn_lat = median(as.double(start_lat), na.rm = T),
+            stn_lon = median(as.double(start_lon), na.rm = T),
+            created = min(start_time), #this doesn't really matter until we have all years' data
+            closed = max(start_time)) %>% #this doesn't really matter until we have all years' data
+  na.omit(.) %>%
+  st_as_sf(coords = c(x="stn_lon", y="stn_lat"), crs=st_crs("EPSG:4326"))
+
+glimpse(stations)
+
+```
+
+```{r census data, results = FALSE}
+census_api_key("837cf2c62e6970a6da0be75548a3c9009ce977ee", overwrite = TRUE)
+
+#Call the census to view a list of available variables:
+acs_variable_list.2020 <- load_variables(2020, #year
+                                         "acs5", #five year ACS estimates
+                                         cache = TRUE)
+
+acs_vars <- c("B01001_001E", #ACS total Pop estimate
+                   "B02001_002E", #Estimated total White only population
+                   #"B08013_001E", #Estimated Aggregate travel time to work (in minutes)
+                   #"B08012_001E", #Estimated Total working population who commute
+                   "B23025_004E", #Estimated Total population who are employed
+                   "B25058_001E", #Estimated Median Rent
+                   "B19013_001E") #Estimated Median Household Income
+
+blockgrps <- get_acs(geography = "block group",
+                             year = 2020, 
+                             variables = acs_vars, 
+                             geometry = TRUE, 
+                             state = "PA", 
+                             county = c("Philadelphia"),
+                             output = "wide") %>%
+  dplyr::select (GEOID, NAME, geometry, all_of(acs_vars)) %>%
+  rename (total_pop = B01001_001E, #ACS total Pop estimate
+          total_white = B02001_002E, #Estimated total White only population
+          #total_commute_time = B08013_001E, #Estimated Aggregate travel time to work (in minutes)
+          #total_commuters =  B08012_001E, #Estimated Total working population who commute
+          total_employed = B23025_004E, #Total employed
+          medRent = B25058_001E, #Estimated Median Rent
+          medIncome = B19013_001E, #Median HH income
+          ) %>% # total kids of middle/highschool age that attend public school
+  mutate(pct_white = (total_white / total_pop),
+         year = 2020,
+         pct_employed = (total_employed / total_pop),
+         #commuting_time = (total_commute_time / total_commuters),
+         #pct_commuters = (total_commuters / total_pop),
+         pct_rent_spent = ((medRent * 12) / medIncome) * 100) %>%
+  #dplyr::select(-total_commute_time, -total_white, -total_employed, -total_commuters) %>%
+  st_transform("EPSG:4326")
+
+# Extract centroids of block groups - these will be our origins
+blockgrps_centroids <- st_centroid(blockgrps) %>%
+  st_sf() %>%
+  st_transform(st_crs(blockgrps))
+```
+
+```{r plot stations}
+
+ggplot()+
+  geom_sf(data = blockgrps)+
+  geom_sf(data = stations, color = "red")
+```
+
+```{r join stations and block groups}
+
+station_census <- st_join(stations, blockgrps,
+                          join=st_intersects,
+                          left = TRUE) %>%
+  rename("station" = "start_station")
+
+glimpse(station_census)
+```
+
+```{r rides geoids}
+rides <- data_2022 %>%
+  left_join(., station_census, by = c("start_station"="station")) %>%
+  rename("start_GEOID" = "GEOID",
+         "start_total_pop" = "total_pop",
+         "start_medRent" = "medRent",
+         "start_medIncome" = "medIncome",
+         "start_pct_white" = "pct_white",
+         "start_pct_employed" = "pct_employed",
+         "start_pct_rent_spent" = "pct_rent_spent") %>%
+  dplyr::select(-created, -closed, -NAME, -total_white, -total_employed, -year) %>%
+  st_drop_geometry() %>%
+  left_join(., station_census, by = c("end_station"="station")) %>%
+  rename("end_GEOID" = "GEOID",
+         "end_total_pop" = "total_pop",
+         "end_medRent" = "medRent",
+         "end_medIncome" = "medIncome",
+         "end_pct_white" = "pct_white",
+         "end_pct_employed" = "pct_employed",
+         "end_pct_rent_spent" = "pct_rent_spent") %>%
+  dplyr::select(-created, -closed, -NAME, -total_white, -total_employed, -year)
+
+glimpse(rides)
+```
+
+```{r parks}
+# whats the best way to get this from the open data philly api?
+# parks <- st_read("https://services.arcgis.com/fLeGjb7u4uXqeF9q/arcgis/rest/services/PPR_Districts_2018/FeatureServer/0/query?outFields=*&where=1%3D1")
+
+#parks <- 
+
+bike_network <- st_read("https://mapservices.pasda.psu.edu/server/services/pasda/PhiladelphiaBikeNetwork_SupportingDatasets/MapServer/WMSServer?request=GetCapabilities&service=WMS")
+
+high_injury_network <- st_read("https://phl.carto.com/api/v2/sql?q=SELECT * FROM high_injury_network_2020")
+```
