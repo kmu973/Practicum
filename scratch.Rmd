@@ -9,6 +9,7 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
+# Set up
 ```{r packages}
 #install.packages("tidyverse")
 #install.packages("sf")
@@ -18,6 +19,7 @@ library(sf)
 library(tidycensus)
 ```
 
+Read in data
 ```{r}
 # read in quarterly files
 q1_2022 <- st_read("./data/indego-trips-2022-q1.csv")
@@ -26,6 +28,9 @@ q3_2022 <- st_read("./data/indego-trips-2022-q3.csv")
 q4_2022 <- st_read("./data/indego-trips-2022-q4.csv")
 ```
 
+Combine data into annual dataframes
+
+**Question for Michael and Matt**: A single year has 900k+ rows - caching, processing, and rendering a single year's data is going to be tough to compute, let alone eight years' worth of data. What's a good alternative?
 ```{r}
 # rbind
 data_2022 <- rbind(q1_2022, q2_2022, q3_2022, q4_2022)
@@ -33,6 +38,8 @@ data_2022 <- rbind(q1_2022, q2_2022, q3_2022, q4_2022)
 #900k rows - how best to run things without crashing my computer?
 ```
 
+## Stations
+Group data into stations, georeference
 ```{r stations}
 stations = data_2022 %>%
   group_by(start_station) %>%
@@ -47,8 +54,10 @@ glimpse(stations)
 
 ```
 
+## Census data
+Pull census data for PHL's blockgroups
 ```{r census data, results = FALSE}
-census_api_key("837cf2c62e6970a6da0be75548a3c9009ce977ee", overwrite = TRUE)
+census_api_key("INSERT_KEY_HERE", overwrite = TRUE)
 
 #Call the census to view a list of available variables:
 acs_variable_list.2020 <- load_variables(2020, #year
@@ -94,6 +103,7 @@ blockgrps_centroids <- st_centroid(blockgrps) %>%
   st_transform(st_crs(blockgrps))
 ```
 
+Map stations
 ```{r plot stations}
 
 ggplot()+
@@ -101,16 +111,18 @@ ggplot()+
   geom_sf(data = stations, color = "red")
 ```
 
+Join stations to their block group's census data
 ```{r join stations and block groups}
 
 station_census <- st_join(stations, blockgrps,
                           join=st_intersects,
                           left = TRUE) %>%
-  rename("station" = "start_station")
+  rename("station" = "start_station") #rename so we don't get confused later
 
 glimpse(station_census)
 ```
 
+Join ride data to start and end stations' census data
 ```{r rides geoids}
 rides <- data_2022 %>%
   left_join(., station_census, by = c("start_station"="station")) %>%
@@ -136,13 +148,23 @@ rides <- data_2022 %>%
 glimpse(rides)
 ```
 
+## Time
+
+## Parks
+**Question for Michael/Matt**: What's the best way to call on the Open Data Philly REST API?
 ```{r parks}
-# whats the best way to get this from the open data philly api?
 # parks <- st_read("https://services.arcgis.com/fLeGjb7u4uXqeF9q/arcgis/rest/services/PPR_Districts_2018/FeatureServer/0/query?outFields=*&where=1%3D1")
+```
 
-#parks <- 
+## Land use
+* Figure out how to access the [Open Data Philly Land Use data set](https://www.opendataphilly.org/dataset/land-use)
 
-bike_network <- st_read("https://mapservices.pasda.psu.edu/server/services/pasda/PhiladelphiaBikeNetwork_SupportingDatasets/MapServer/WMSServer?request=GetCapabilities&service=WMS")
+## Bike network
+```{r bike network}
+#bike_network <- st_read("https://mapservices.pasda.psu.edu/server/services/pasda/PhiladelphiaBikeNetwork_SupportingDatasets/MapServer/WMSServer?request=GetCapabilities&service=WMS")
+```
 
-high_injury_network <- st_read("https://phl.carto.com/api/v2/sql?q=SELECT * FROM high_injury_network_2020")
+## High Injury Network
+```{r high injury network}
+#high_injury_network <- st_read("https://phl.carto.com/api/v2/sql?q=SELECT * FROM high_injury_network_2020")
 ```
