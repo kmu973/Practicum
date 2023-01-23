@@ -14,9 +14,46 @@ knitr::opts_chunk$set(echo = TRUE)
 #install.packages("tidyverse")
 #install.packages("sf")
 #install.packages("tidycensus")
+#install.packages("riem")
+#install.packages("gridExtra")
 library(tidyverse)
 library(sf)
 library(tidycensus)
+library(riem)
+library(gridExtra)
+
+plotTheme <- theme(
+  plot.title =element_text(size=12),
+  plot.subtitle = element_text(size=8),
+  plot.caption = element_text(size = 6),
+  axis.text.x = element_text(size = 10, angle = 45, hjust = 1),
+  axis.text.y = element_text(size = 10),
+  axis.title.y = element_text(size = 10),
+  # Set the entire chart region to blank
+  panel.background=element_blank(),
+  plot.background=element_blank(),
+  #panel.border=element_rect(colour="#F0F0F0"),
+  # Format the grid
+  panel.grid.major=element_line(colour="#D0D0D0",size=.2),
+  axis.ticks=element_blank())
+
+mapTheme <- theme(plot.title =element_text(size=12),
+                  plot.subtitle = element_text(size=8),
+                  plot.caption = element_text(size = 6),
+                  axis.line=element_blank(),
+                  axis.text.x=element_blank(),
+                  axis.text.y=element_blank(),
+                  axis.ticks=element_blank(),
+                  axis.title.x=element_blank(),
+                  axis.title.y=element_blank(),
+                  panel.background=element_blank(),
+                  panel.border=element_blank(),
+                  panel.grid.major=element_line(colour = 'transparent'),
+                  panel.grid.minor=element_blank(),
+                  legend.direction = "vertical", 
+                  legend.position = "right",
+                  plot.margin = margin(1, 1, 1, 1, 'cm'),
+                  legend.key.height = unit(1, "cm"), legend.key.width = unit(0.2, "cm"))
 ```
 
 Read in data
@@ -45,8 +82,9 @@ stations = data_2022 %>%
   group_by(start_station) %>%
   summarize(stn_lat = median(as.double(start_lat), na.rm = T),
             stn_lon = median(as.double(start_lon), na.rm = T),
-            created = min(start_time), #this doesn't really matter until we have all years' data
-            closed = max(start_time)) %>% #this doesn't really matter until we have all years' data
+            created = min(start_time), #trying to idenfity when the station opened - this doesn't really matter until we have all years' data
+            closed = max(start_time), #trying to identify if/when the station closed - this doesn't really matter until we have all years' data
+            ridership = length(unique(trip_id))) %>% 
   na.omit(.) %>%
   st_as_sf(coords = c(x="stn_lon", y="stn_lat"), crs=st_crs("EPSG:4326"))
 
@@ -54,7 +92,8 @@ glimpse(stations)
 
 ```
 
-## Census data
+## Data Sources
+### Census data
 Pull census data for PHL's blockgroups
 ```{r census data, results = FALSE}
 census_api_key("INSERT_KEY_HERE", overwrite = TRUE)
@@ -103,14 +142,6 @@ blockgrps_centroids <- st_centroid(blockgrps) %>%
   st_transform(st_crs(blockgrps))
 ```
 
-Map stations
-```{r plot stations}
-
-ggplot()+
-  geom_sf(data = blockgrps)+
-  geom_sf(data = stations, color = "red")
-```
-
 Join stations to their block group's census data
 ```{r join stations and block groups}
 
@@ -133,7 +164,7 @@ rides <- data_2022 %>%
          "start_pct_white" = "pct_white",
          "start_pct_employed" = "pct_employed",
          "start_pct_rent_spent" = "pct_rent_spent") %>%
-  dplyr::select(-created, -closed, -NAME, -total_white, -total_employed, -year) %>%
+  dplyr::select(-created, -closed, -NAME, -total_white, -total_employed, -year, -ridership) %>%
   st_drop_geometry() %>%
   left_join(., station_census, by = c("end_station"="station")) %>%
   rename("end_GEOID" = "GEOID",
@@ -143,28 +174,188 @@ rides <- data_2022 %>%
          "end_pct_white" = "pct_white",
          "end_pct_employed" = "pct_employed",
          "end_pct_rent_spent" = "pct_rent_spent") %>%
-  dplyr::select(-created, -closed, -NAME, -total_white, -total_employed, -year)
+  dplyr::select(-created, -closed, -NAME, -total_white, -total_employed, -year, -ridership) %>%
+  mutate(start_time = as.POSIXct(start_time, tz="", format = "%m/%d/%Y %H:%M"),
+         end_time = as.POSIXct(end_time, tz="", format = "%m/%d/%Y %H:%M"),
+         interval60 = ymd_h(substr(start_time,1,13)),
+         week = week(interval60),
+         dotw = wday(interval60, label=TRUE),
+         duration = as.numeric(duration))
+         
 
 glimpse(rides)
 ```
 
-## Time
+### Time
+```{r time}
 
-## Parks
+```
+
+### Weather
+Weather will probably not ultimately be very helpful to us, since this isn't a temporal model - but I'm including it here to help us ID seasonal variation in ridership.
+```{r weather}
+weather.Panel <- 
+  riem_measures(station = "PHL", date_start = "2022-01-01", date_end = "2022-12-31") %>%
+  dplyr::select(valid, tmpf, p01i, sknt)%>%
+  replace(is.na(.), 0) %>%
+    mutate(interval60 = ymd_h(substr(valid,1,13))) %>%
+    mutate(week = week(interval60),
+           dotw = wday(interval60, label=TRUE)) %>%
+    group_by(interval60) %>%
+    summarize(Temperature = max(tmpf),
+              Precipitation = sum(p01i),
+              Wind_Speed = max(sknt)) %>%
+    mutate(Temperature = ifelse(Temperature == 0, 42, Temperature))
+
+glimpse(weather.Panel)
+```
+
+```{r plot weather}
+weather_panel <- grid.arrange(
+  ggplot(weather.Panel, aes(interval60,Precipitation, color = Precipitation)) + geom_line() + scale_color_gradient(low = "#d0d1e6", high = "#0570b0")+
+  labs(title="Precipitation", x="Hour", y="inches") + theme_bw(),
+  
+  ggplot(weather.Panel, aes(interval60,Wind_Speed, color = Wind_Speed)) + geom_line() + 
+    scale_color_gradient(low = "#9ebcda", high = "#4d004b")+
+    labs(title="Wind Speed", x="Hour", y="mph", color="Wind Speed") + theme_bw(),
+  
+  ggplot(weather.Panel, aes(interval60,Temperature, color = Temperature)) + geom_line() + 
+    scale_color_gradient(low = "#74add1", high = "#f46d43")+
+    labs(title="Temperature", x="Hour", y="Temperature (°F)") + theme_bw(),
+  
+  top="Weather Data - Philadelphia, 2022")
+```
+
+### Parks
 **Question for Michael/Matt**: What's the best way to call on the Open Data Philly REST API?
 ```{r parks}
 # parks <- st_read("https://services.arcgis.com/fLeGjb7u4uXqeF9q/arcgis/rest/services/PPR_Districts_2018/FeatureServer/0/query?outFields=*&where=1%3D1")
 ```
 
-## Land use
+Various sources: https://openmaps.phila.gov/
+
+### Land use
 * Figure out how to access the [Open Data Philly Land Use data set](https://www.opendataphilly.org/dataset/land-use)
 
-## Bike network
+### Commercial corridors
+https://metadata.phila.gov/#home/representationdetails/56423a4e902dbdd813db9a55/
+
+### Bike network
 ```{r bike network}
 #bike_network <- st_read("https://mapservices.pasda.psu.edu/server/services/pasda/PhiladelphiaBikeNetwork_SupportingDatasets/MapServer/WMSServer?request=GetCapabilities&service=WMS")
+
+#https://metadata.phila.gov/#home/representationdetails/55438ac89b989a05172d0d77/
+
+#https://www.pasda.psu.edu/uci/DataSummary.aspx?dataset=1026
+
 ```
 
-## High Injury Network
+### High Injury Network
 ```{r high injury network}
 #high_injury_network <- st_read("https://phl.carto.com/api/v2/sql?q=SELECT * FROM high_injury_network_2020")
+
+#https://www.opendataphilly.org/dataset/high-injury-network
+```
+
+### PHL City Landmarks
+```{r city landmarks}
+
+https://www.opendataphilly.org/dataset/city-landmarks
+```
+
+### Street Nodes
+https://www.opendataphilly.org/dataset/street-nodes
+
+### Street centerlines
+https://www.opendataphilly.org/dataset/street-centerlines
+
+### SEPTA locations
+https://www.opendataphilly.org/dataset/septa-locations-api
+
+# Exploratory Analysis
+##Map current stations
+
+Map stations
+```{r plot stations}
+
+ggplot()+
+  geom_sf(data = blockgrps)+
+  geom_sf(data = stations, color = "red") +
+  # ylim(39.89, 40.01)+
+  # xlim(-75.23, -75.12)+
+  mapTheme
+```
+
+Map stations by ridership - rides appear to be clustered in center city
+```{r stations by ridership}
+ggplot()+
+  geom_sf(data = blockgrps)+
+  geom_sf(data=station_census, aes(size = ridership, color = ridership), alpha = 0.7)+
+  ylim(39.89, 40.01)+
+  xlim(-75.23, -75.12)+
+  mapTheme
+```
+
+Plot distribution of trips
+```{r plot trip distributions}
+ggplot()+
+  geom_histogram(data = station_census, aes(x = ridership))
+
+```
+
+Map stations by ridership quartile
+```{r stations by ridership quartile}
+station_census %>%
+         mutate(ridership_quartile = case_when( # based on summary(station_census$ridership)
+           ridership <= 1788 ~ "1st Quartile",
+           ridership > 1788 & ridership <= 3919 ~ "2nd Quartile", #based on median
+           ridership > 3919 & ridership <= 7105 ~ "3rd Quartile",
+           ridership > 7105 ~ "4th Quartile"
+         )) %>%
+  ggplot(data = .)+
+    geom_sf(data = blockgrps)+
+    geom_sf(aes(color = ridership_quartile, size = ridership), alpha = 0.7)+
+    ylim(39.89, 40.01)+
+    xlim(-75.23, -75.12)+
+    mapTheme
+```
+
+## Plot correlations
+Plot initial correlations between census variables and station ridership - this is a very busy plot, but gives us a sense of when ridership peaks (as expected, in summer).
+```{r exploratory correlations}
+st_drop_geometry(station_census) %>%
+  dplyr::select(ridership, pct_rent_spent, pct_white, pct_employed) %>%
+  gather(Variable, Value, - ridership) %>%
+  ggplot(aes(Value, ridership))+
+  geom_point(size = 0.5, color = "black")+
+  geom_smooth(method = lm, se = FALSE, color = "#cc4778", size = 2)+
+  scale_x_continuous(n.breaks = 5)+
+  facet_wrap(~Variable, ncol = 2, scales = "free")+
+  labs(title = "Ridership as a function of station features")+
+  plotTheme
+```
+
+Number of rides by station by week - the steep drop at week 40 correlates with bad weather in the same week.
+```{r rides by station by week}
+ggplot(rides)+
+  geom_freqpoly(aes(week, color = start_station), binwidth = 1)
+  
+
+rides_per_station_per_week <- rides %>%
+  group_by(week, start_station) %>%
+  summarize(rides_per_week = length(unique(trip_id)))
+
+ggplot(rides_per_station_per_week)+
+  geom_line(aes(x=week, y=rides_per_week, color = start_station))+
+  guides(color = "none")+
+  labs(title = "Rides by station by week, 2022")+
+  plotTheme
+```
+
+Number of rides by bike type by week
+```{r rides by station by week}
+ggplot(rides)+
+  geom_freqpoly(aes(week, color = bike_type), binwidth = 1)+
+  labs(title = "Rides by bike type over the course of 2022")+
+  plotTheme
 ```
